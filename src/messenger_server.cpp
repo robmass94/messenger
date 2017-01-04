@@ -3,6 +3,7 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <set>
 #include <sstream>
 #include <string>
@@ -22,7 +23,7 @@
 
 void loadUserFile(char*);
 void *handleConnection(void*);
-User *getUserInfo(const std::string&);
+std::shared_ptr<User> getUserInfo(const std::string&);
 int getUserFd(const std::string&);
 void writeToUserFile();
 void createFriendship(const std::string&, const std::string&);
@@ -33,8 +34,8 @@ void termination_handler(int);
 
 int server_socket;
 std::set<int> all_connections;
-std::vector<User*> user_info;
-std::map<int, User*> online_users;
+std::vector<std::shared_ptr<User>> user_info;
+std::map<int, std::shared_ptr<User>> online_users;
 std::string user_filename;
 pthread_mutex_t connections_mutex;
 pthread_mutex_t user_info_mutex;
@@ -152,7 +153,7 @@ void loadUserFile(char *u_fname)
 		std::string contact;
 		getline(strm, username, '|');
 		getline(strm, password, '|');
-		User *u = new User(username, password);
+		std::shared_ptr<User> u(new User(username, password));
 		while (getline(strm, contact, ';')) {
 			u->addFriend(contact);
 		}
@@ -190,7 +191,7 @@ void *handleConnection(void *sock)
 				strm >> username >> password;
 				pthread_mutex_lock(&user_info_mutex);
 				if (isUsernameAvailable(username)) {
-					user_info.push_back(new User(username, password));
+					user_info.push_back(std::make_shared<User>(username, password));
 					snprintf(buffer, sizeof(buffer), "REGISTER %s 200", username.c_str());
 				} else {
 					snprintf(buffer, sizeof(buffer), "REGISTER %s 500", username.c_str());
@@ -229,7 +230,9 @@ void *handleConnection(void *sock)
 					int fd = itr->first;
 					if (fd != socket_fd && itr->second->hasFriend(username)) {
 						write(fd, buffer, sizeof(buffer));
-						snprintf(friend_location_buffer, sizeof(friend_location_buffer), "LOCATION %s %s %s", itr->second->getUsername().c_str(), itr->second->getHostname().c_str(), itr->second->getPort().c_str());
+						std::string friend_username = itr->second->getUsername();
+						Location friend_address = itr->second->getAddressInfo();
+						snprintf(friend_location_buffer, sizeof(friend_location_buffer), "LOCATION %s %s %s", friend_username.c_str(), friend_address.hostname.c_str(), friend_address.port.c_str());
 						write(socket_fd, friend_location_buffer, sizeof(friend_location_buffer));
 					}
 				}
@@ -258,16 +261,19 @@ void *handleConnection(void *sock)
 				getline(strm, message);
 				pthread_mutex_lock(&online_users_mutex);
 				int inviter_fd = getUserFd(inviter_username);
+				Location inviter_address = online_users[inviter_fd]->getAddressInfo();
+				std::string client_username = online_users[socket_fd]->getUsername();
+				Location client_address = online_users[socket_fd]->getAddressInfo();
 				// let inviter know client has accepted invite
-				snprintf(buffer, sizeof(buffer), "INVITE_ACCEPT %s %s", online_users[socket_fd]->getUsername().c_str(), message.c_str());
+				snprintf(buffer, sizeof(buffer), "INVITE_ACCEPT %s %s", client_username.c_str(), message.c_str());
 				write(inviter_fd, buffer, sizeof(buffer));
 				// update friend lists
-				createFriendship(inviter_username, online_users[socket_fd]->getUsername());
+				createFriendship(inviter_username, client_username);
 				// send location information of inviter to client
-				snprintf(buffer, sizeof(buffer), "LOCATION %s %s %s", online_users[inviter_fd]->getUsername().c_str(), online_users[inviter_fd]->getHostname().c_str(), online_users[inviter_fd]->getPort().c_str());
+				snprintf(buffer, sizeof(buffer), "LOCATION %s %s %s", inviter_username.c_str(), inviter_address.hostname.c_str(), inviter_address.port.c_str());
 				write(socket_fd, buffer, sizeof(buffer));
 				// send location information of client to inviter
-				snprintf(buffer, sizeof(buffer), "LOCATION %s %s %s", online_users[socket_fd]->getUsername().c_str(), online_users[socket_fd]->getHostname().c_str(), online_users[socket_fd]->getPort().c_str());
+				snprintf(buffer, sizeof(buffer), "LOCATION %s %s %s", client_username.c_str(), client_address.hostname.c_str(), client_address.port.c_str());
 				write(inviter_fd, buffer, sizeof(buffer));
 				pthread_mutex_unlock(&online_users_mutex);
 			} else if (command == "LOGOUT") {
@@ -313,7 +319,7 @@ void *handleConnection(void *sock)
 	return nullptr;
 }
 
-User *getUserInfo(const std::string &username)
+std::shared_ptr<User> getUserInfo(const std::string &username)
 {
 	// retrieve registered user information
 	for (auto itr = user_info.begin(); itr != user_info.end(); ++itr) {
@@ -369,11 +375,10 @@ bool isCorrectLogin(const std::string &username, const std::string &password)
 
 void termination_handler(int sig_num)
 {
-	// write user information to file, and clean up allocated memory
+	// write user information to file
 	std::ofstream user_file(user_filename);
 	for (auto itr = user_info.begin(); itr != user_info.end(); ++itr) {
 		user_file << (*itr)->infoToString() << '\n';
-		delete *itr;
 	}
 	user_file.close();
 

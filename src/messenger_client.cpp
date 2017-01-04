@@ -1,9 +1,9 @@
-#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -30,8 +30,7 @@ void exitHandler();
 void termination_handler(int);
 int getUserFd(const std::string&);
 bool hasFriend(const std::string&);
-std::string getFriendHostname(const std::string&);
-std::string getFriendPort(const std::string&);
+Location getFriendAddress(const std::string&);
 void removeFriendInfo(const std::string&);
 void removeConnectedFriend(const int&);
 bool hasInviteFrom(const std::string&);
@@ -45,7 +44,7 @@ int local_socket;
 int server_socket;
 std::string client_username;
 std::string server_hostname;
-std::vector<User*> friend_info;
+std::vector<std::shared_ptr<User>> friend_info;
 std::vector<std::string> received_invites;
 std::vector<std::string> sent_invites;
 std::map<int, std::string> connected_friends;
@@ -267,10 +266,12 @@ void *handleStdin(void *arg)
 				// register with server
 				std::string username;
 				std::string password;
-				std::cout << "Username: ";
-				std::cin >> username;
-				std::cout << "Password: ";
-				std::cin >> password;
+				strm >> username >> password;
+
+				if (username.empty() || password.empty()) {
+					std::cout << "Syntax: register [username] [password]\n";
+					continue;
+				}
 
 				snprintf(buffer, sizeof(buffer), "REGISTER %s %s", username.c_str(), createHash(password));
 				write(server_socket, buffer, sizeof(buffer));
@@ -278,10 +279,12 @@ void *handleStdin(void *arg)
 				// login to server
 				std::string username;
 				std::string password;
-				std::cout << "Username: ";
-				std::cin >> username;
-				std::cout << "Password: ";
-				std::cin >> password;
+				strm >> username >> password;
+
+				if (username.empty() || password.empty()) {
+					std::cout << "Syntax: login [username] [password]\n";
+					continue;
+				}
 
 				snprintf(buffer, sizeof(buffer), "LOGIN %s %s", username.c_str(), createHash(password));
 				write(server_socket, buffer, sizeof(buffer));
@@ -318,52 +321,54 @@ void *handleStdin(void *arg)
 				int friend_fd = getUserFd(username);
 				if (friend_fd < 0) {
 					// not connected, need to first establish connection
+					Location friend_address;
 					pthread_mutex_lock(&friend_info_mutex);
-					std::string friend_hostname = getFriendHostname(username);
-					std::string friend_port = getFriendPort(username);
-					pthread_mutex_unlock(&friend_info_mutex);
-					if (friend_hostname != "NOT FOUND" && friend_port != "NOT FOUND") {
-						struct addrinfo hints;
-						struct addrinfo *info;
-						int new_socket;
-
-						memset(&hints, 0, sizeof(hints));
-						hints.ai_family = AF_INET;
-						hints.ai_socktype = SOCK_STREAM;
-						hints.ai_flags = AI_CANONNAME;
-
-						if (getaddrinfo(friend_hostname.c_str(), friend_port.c_str(), &hints, &info) != 0) {
-							std::cout << "Failed to get address information of friend " << username << '\n';
-							continue;
-						}
-						if ((new_socket = socket(info->ai_family, info->ai_socktype, info->ai_protocol)) < 0) {
-							std::cout << "Failed to create socket to friend " << username << '\n';
-							continue;
-						}
-						if (connect(new_socket, info->ai_addr, info->ai_addrlen) < 0) {
-							std::cout << "Failed to establish connection with friend " << username << '\n';
-							continue;
-						}
-
-						friend_fd = new_socket;
-
-						// let friend know of username
-						sprintf(buffer, "USER %s", client_username.c_str());
-						write(friend_fd, buffer, sizeof(buffer));
-
-						// create thread to handle messages from newly connected friend
-						pthread_t new_thread;
-						if (pthread_create(&new_thread, &detached_thread_attr, handleFriend, (void*)&friend_fd) != 0) {
-							continue;
-						}
-						pthread_mutex_lock(&connected_threads_mutex);
-						connected_threads.insert(std::make_pair(friend_fd, new_thread));
-						pthread_mutex_unlock(&connected_threads_mutex);
-						connected_friends.insert(std::make_pair(friend_fd, username));
-					} else {
-						std::cout << "Friend " << username << " not found\n";
+					try {
+						friend_address = getFriendAddress(username);	
+					} catch (std::string err) {
+						std::cout << err << '\n';
+						pthread_mutex_unlock(&friend_info_mutex);
 						continue;
 					}
+					pthread_mutex_unlock(&friend_info_mutex);
+				
+					struct addrinfo hints;
+					struct addrinfo *info;
+					int new_socket;
+
+					memset(&hints, 0, sizeof(hints));
+					hints.ai_family = AF_INET;
+					hints.ai_socktype = SOCK_STREAM;
+					hints.ai_flags = AI_CANONNAME;
+
+					if (getaddrinfo(friend_address.hostname.c_str(), friend_address.port.c_str(), &hints, &info) != 0) {
+						std::cout << "Failed to get address information of friend " << username << '\n';
+						continue;
+					}
+					if ((new_socket = socket(info->ai_family, info->ai_socktype, info->ai_protocol)) < 0) {
+						std::cout << "Failed to create socket to friend " << username << '\n';
+						continue;
+					}
+					if (connect(new_socket, info->ai_addr, info->ai_addrlen) < 0) {
+						std::cout << "Failed to establish connection with friend " << username << '\n';
+						continue;
+					}
+
+					friend_fd = new_socket;
+
+					// let friend know of username
+					sprintf(buffer, "USER %s", client_username.c_str());
+					write(friend_fd, buffer, sizeof(buffer));
+
+					// create thread to handle messages from newly connected friend
+					pthread_t new_thread;
+					if (pthread_create(&new_thread, &detached_thread_attr, handleFriend, (void*)&friend_fd) != 0) {
+						continue;
+					}
+					pthread_mutex_lock(&connected_threads_mutex);
+					connected_threads.insert(std::make_pair(friend_fd, new_thread));
+					pthread_mutex_unlock(&connected_threads_mutex);
+					connected_friends.insert(std::make_pair(friend_fd, username));
 				}
 				pthread_mutex_unlock(&connected_friends_mutex);
 				// send the message
@@ -501,7 +506,7 @@ void *handleServer(void *arg)
 				strm >> username >> address >> port;
 				std::cout << "Friend " << username << " is online\n";
 				pthread_mutex_lock(&friend_info_mutex);
-				friend_info.push_back(new User(username, address, port));
+				friend_info.push_back(std::make_shared<User>(username, address, port));
 				pthread_mutex_unlock(&friend_info_mutex);
 			} else if (type == "INVITE_FROM") {
 				std::string username;
@@ -586,24 +591,15 @@ bool hasFriend(const std::string &username)
 	return false;
 }
 
-std::string getFriendHostname(const std::string &username)
+Location getFriendAddress(const std::string &username)
 {
 	for (auto itr = friend_info.begin(); itr != friend_info.end(); ++itr) {
 		if ((*itr)->getUsername() == username) {
-			return (*itr)->getHostname();
+			return (*itr)->getAddressInfo();
 		}
 	}
-	return "NOT FOUND";
-}
-
-std::string getFriendPort(const std::string &username)
-{
-	for (auto itr = friend_info.begin(); itr != friend_info.end(); ++itr) {
-		if ((*itr)->getUsername() == username) {
-			return (*itr)->getPort();
-		}
-	}
-	return "NOT FOUND";
+	
+	throw "Friend " + username + " not found";
 }
 
 void removeFriendInfo(const std::string &username)
@@ -611,7 +607,6 @@ void removeFriendInfo(const std::string &username)
 	// remove friend's location information
 	for (auto itr = friend_info.begin(); itr != friend_info.end(); ++itr) {
 		if ((*itr)->getUsername() == username) {
-			delete *itr;
 			friend_info.erase(itr);
 			break;
 		}
@@ -699,8 +694,8 @@ void termination_handler(int sig_num)
 void displayHelp()
 {
 	if (!logged_in) {
-		std::cout << "register - register as new user\n";
-		std::cout << "login - login as user\n";
+		std::cout << "register [username] [password] - register as new user\n";
+		std::cout << "login [username] [password] - login as user\n";
 		std::cout << "exit - exit the program\n";
 	} else {
 		std::cout << "message [friend username] [message] - send message to friend\n";

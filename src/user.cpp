@@ -9,8 +9,8 @@ User::User(const std::string &u, const std::string &p)
 User::User(const std::string &u, const std::string &h, const std::string &p)
 {
 	username = u;
-	hostname = h;
-	port = p;
+	address.hostname = h;
+	address.port = p;
 }
 
 void User::addFriend(const std::string &uname)
@@ -20,8 +20,13 @@ void User::addFriend(const std::string &uname)
 
 void User::setAddressInfo(const std::string &h, const std::string &p)
 {
-	hostname = h;
-	port = p;
+	address.hostname = h;
+	address.port = p;
+}
+
+Location User::getAddressInfo() const
+{
+	return address;
 }
 
 bool User::hasFriend(const std::string &uname) const
@@ -58,14 +63,4 @@ std::string User::getUsername() const
 std::string User::getPassword() const
 {
 	return password;
-}
-
-std::string User::getHostname() const
-{
-	return hostname;
-}
-
-std::string User::getPort() const
-{
-	return port;
 }
